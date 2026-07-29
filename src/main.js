@@ -60,17 +60,13 @@ function renderLogin() {
 
 async function login(event) {
   event.preventDefault();
-
   const fd = new FormData(event.currentTarget);
-
   const { error } = await supabase.auth.signInWithPassword({
     email: String(fd.get("email")).trim(),
     password: String(fd.get("password"))
   });
-
   if (error) {
     notify(`შესვლა ვერ მოხერხდა: ${error.message}`, "error");
-    return;
   }
 }
 
@@ -84,6 +80,18 @@ async function loadProfile() {
 }
 
 function renderShell() {
+  const roleViews = {
+    admin: [
+      ["form", "ახალი ჩანაწერი"],
+      ["registry", "თვიური რეესტრი"],
+      ["users", "მომხმარებლები"]
+    ],
+    reviewer: [["registry", "თვიური რეესტრი"]],
+    doctor: [["form", "ახალი ჩანაწერი"]]
+  };
+  const views = roleViews[profile.role] || [];
+  const initialView = views[0]?.[0];
+
   app.innerHTML = `
     <div class="shell">
       <header class="topbar">
@@ -92,20 +100,27 @@ function renderShell() {
       </header>
       <main class="container">
         <nav class="tabs no-print">
-          <button class="tab active" data-view="form">ახალი ჩანაწერი</button>
-          <button class="tab" data-view="registry">თვიური რეესტრი</button>
-          ${profile.role === "admin" ? '<button class="tab" data-view="users">მომხმარებლები</button>' : ""}
+          ${views.map(([view, label], index) => `<button class="tab ${index === 0 ? "active" : ""}" data-view="${view}">${label}</button>`).join("")}
         </nav>
-        <section id="view"></section>
+        <section id="view">${initialView ? "" : '<div class="card"><p class="error">ამ ანგარიშს მოქმედი როლი არ აქვს.</p></div>'}</section>
       </main>
     </div>
     <div id="modalRoot"></div>`;
   document.querySelector("#logoutBtn").onclick = () => supabase.auth.signOut();
   document.querySelectorAll(".tab").forEach(btn => btn.onclick = () => switchView(btn.dataset.view));
-  switchView("form");
+  if (initialView) switchView(initialView);
 }
 
 function switchView(view) {
+  const allowed = {
+    admin: ["form", "registry", "users"],
+    reviewer: ["registry"],
+    doctor: ["form"]
+  };
+  if (!(allowed[profile.role] || []).includes(view)) {
+    document.querySelector("#view").innerHTML = '<div class="card"><p class="error">ამ განყოფილებაზე წვდომა არ გაქვთ.</p></div>';
+    return;
+  }
   document.querySelectorAll(".tab").forEach(x => x.classList.toggle("active", x.dataset.view === view));
   if (view === "form") renderForm();
   if (view === "registry") renderRegistry();
@@ -198,9 +213,15 @@ async function loadRecords() {
   const start = `${month}-01T00:00:00`;
   const endDate = new Date(`${month}-01T00:00:00`);
   endDate.setMonth(endDate.getMonth() + 1);
-  const { data, error } = await supabase.from("communication_records").select("*")
-    .gte("communication_at", start).lt("communication_at", endDate.toISOString())
-    .order("communication_at", { ascending: false });
+  const request = profile.role === "reviewer"
+    ? supabase.rpc("get_monthly_registry", {
+      p_start: start,
+      p_end: endDate.toISOString()
+    })
+    : supabase.from("communication_records").select("*")
+      .gte("communication_at", start).lt("communication_at", endDate.toISOString())
+      .order("communication_at", { ascending: false });
+  const { data, error } = await request;
   if (error) {
     document.querySelector("#registryContent").innerHTML = `<p class="error">${esc(error.message)}</p>`;
     return;
@@ -217,29 +238,61 @@ function filteredRecords() {
 
 function drawTable() {
   const data = filteredRecords();
+  const canViewFullRecord = profile.role === "admin";
   const departments = new Set(data.map(x => x.department)).size;
   const doctors = new Set(data.map(x => x.doctor_name)).size;
   document.querySelector("#registryContent").innerHTML = `
     <div class="stats"><div class="stat"><b>${data.length}</b>ჩანაწერი</div><div class="stat"><b>${departments}</b>განყოფილება</div><div class="stat"><b>${doctors}</b>ექიმი</div></div>
     <div class="table-wrap"><table><thead><tr>
-      <th>კომუნიკაცია</th><th>პაციენტი</th><th>ისტორიის №</th><th>შემოსვლა</th><th>განყოფილება</th><th>ექიმი</th><th>საკონტაქტო პირი</th><th class="no-print">სრული ფორმა</th>
+      <th>კომუნიკაცია</th><th>პაციენტი</th><th>ისტორიის №</th><th>შემოსვლა</th><th>განყოფილება</th><th>ექიმი</th><th>საკონტაქტო პირი</th>
+      ${canViewFullRecord ? '<th class="no-print">სრული ფორმა</th>' : ""}
     </tr></thead><tbody>${data.length ? data.map(r => `<tr>
       <td>${dateKa(r.communication_at,true)}</td><td>${esc(r.patient_name)}</td><td>${esc(r.history_number)}</td>
       <td>${dateKa(r.admission_date)}</td><td>${esc(r.department)}</td><td>${esc(r.doctor_name)}</td><td>${esc(r.contact_name)}</td>
-      <td class="no-print"><button class="link-btn" data-id="${r.id}">ნახვა</button></td></tr>`).join("") : '<tr><td colspan="8">ამ თვეში ჩანაწერი არ მოიძებნა.</td></tr>'}</tbody></table></div>`;
-  document.querySelectorAll("[data-id]").forEach(btn => btn.onclick = () => showRecord(btn.dataset.id));
+      ${canViewFullRecord ? `<td class="no-print"><button class="link-btn" data-id="${r.id}">ნახვა</button></td>` : ""}
+      </tr>`).join("") : `<tr><td colspan="${canViewFullRecord ? 8 : 7}">ამ თვეში ჩანაწერი არ მოიძებნა.</td></tr>`}</tbody></table></div>`;
+  if (canViewFullRecord) {
+    document.querySelectorAll("[data-id]").forEach(btn => btn.onclick = () => showRecord(btn.dataset.id));
+  }
 }
 
 function showRecord(id) {
+  if (profile.role !== "admin") return;
   const r = records.find(x => x.id === id);
   if (!r) return;
   document.querySelector("#modalRoot").innerHTML = `<div class="modal" id="recordModal"><div class="modal-card">
     <h2>კომუნიკაციის სრული ჩანაწერი</h2>
     <div class="detail-grid">${Object.entries(labels).map(([key,label]) => `<div class="detail ${["information_summary","questions_answers","agreed_actions"].includes(key) ? "wide" : ""}"><b>${label}</b>${esc(key.includes("date") || key.endsWith("_at") ? dateKa(r[key], key.endsWith("_at")) : r[key] || "—")}</div>`).join("")}</div>
-    <div class="actions"><button class="btn" id="printRecord">ბეჭდვა</button><button class="btn primary" id="closeModal">დახურვა</button></div>
+    <div class="actions">
+      ${profile.role === "admin" ? '<button class="btn danger" id="deleteRecord">ჩანაწერის წაშლა</button>' : ""}
+      <button class="btn" id="printRecord">ბეჭდვა</button>
+      <button class="btn primary" id="closeModal">დახურვა</button>
+    </div>
   </div></div>`;
   document.querySelector("#closeModal").onclick = () => document.querySelector("#modalRoot").innerHTML = "";
   document.querySelector("#printRecord").onclick = () => window.print();
+  document.querySelector("#deleteRecord")?.addEventListener("click", () => deleteRecord(r));
+}
+
+async function deleteRecord(record) {
+  if (profile.role !== "admin") return;
+  const confirmed = confirm(
+    `ნამდვილად წაიშალოს ${record.patient_name}-ის ჩანაწერი (ისტორიის № ${record.history_number})?\n\nეს მოქმედება შეუქცევადია.`
+  );
+  if (!confirmed) return;
+
+  const { error } = await supabase
+    .from("communication_records")
+    .delete()
+    .eq("id", record.id);
+
+  if (error) {
+    alert(`ჩანაწერის წაშლა ვერ მოხერხდა: ${error.message}`);
+    return;
+  }
+
+  document.querySelector("#modalRoot").innerHTML = "";
+  await loadRecords();
 }
 
 function csvCell(value) { return `"${String(value ?? "").replaceAll('"','""')}"`; }
