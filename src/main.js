@@ -60,9 +60,18 @@ function renderLogin() {
 
 async function login(event) {
   event.preventDefault();
+
   const fd = new FormData(event.currentTarget);
-  const { error } = await supabase.auth.signInWithPassword({ email: fd.get("email"), password: fd.get("password") });
-  if (error) notify("შესვლა ვერ მოხერხდა: ${error.message}`, "error");
+
+  const { error } = await supabase.auth.signInWithPassword({
+    email: String(fd.get("email")).trim(),
+    password: String(fd.get("password"))
+  });
+
+  if (error) {
+    notify(`შესვლა ვერ მოხერხდა: ${error.message}`, "error");
+    return;
+  }
 }
 
 async function loadProfile() {
